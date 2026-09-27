@@ -47,3 +47,71 @@ printf 'H%s%s%s\n' \
   "$(openssl rand -hex 4 | tr '[:lower:]' '[:upper:]')" \
   "$(shuf -i 0-9 -n 1)"
 """
+
+[env]
+_.file = ".env"
+
+[tasks.hatchet-worker]
+description = "Start the Hatchet deployment worker"
+dir = "hello-world"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+
+poetry run python src/worker.py
+"""
+
+[tasks.hatchet-run]
+description = "Run the deployment workflow synchronously"
+dir = "hello-world"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+
+ENVIRONMENT="${1:-staging}"
+VERSION="${2:-1.0.0}"
+
+PYTHONPATH=src poetry run python - "$ENVIRONMENT" "$VERSION" <<'PY'
+import sys
+
+from workflows.deployment import DeploymentInput, deployment_workflow
+
+result = deployment_workflow.run(
+    DeploymentInput(
+        environment=sys.argv[1],
+        version=sys.argv[2],
+    )
+)
+
+print("Deployment completed:")
+print(result)
+PY
+"""
+
+
+[tasks.hatchet-run-async]
+description = "Trigger the deployment workflow without waiting"
+dir = "hello-world"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+
+ENVIRONMENT="${1:-staging}"
+VERSION="${2:-1.0.0}"
+
+PYTHONPATH=src poetry run python - "$ENVIRONMENT" "$VERSION" <<'PY'
+import sys
+
+from workflows.deployment import DeploymentInput, deployment_workflow
+
+run = deployment_workflow.run(
+    DeploymentInput(
+        environment=sys.argv[1],
+        version=sys.argv[2],
+    ),
+    wait_for_result=False,
+)
+
+print(f"Hatchet run started: {run}")
+PY
+"""

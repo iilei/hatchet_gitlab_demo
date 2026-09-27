@@ -1,9 +1,13 @@
+from workflows.deployment import deployment_workflow
 from hatchet_client import hatchet
-from workflows.first_workflow import my_task
 
 
 def main() -> None:
-    worker = hatchet.worker("test-worker", workflows=[my_task])
+    worker = hatchet.worker(
+        "deployment-worker",
+        workflows=[deployment_workflow],
+    )
+
     worker.start()
 
 

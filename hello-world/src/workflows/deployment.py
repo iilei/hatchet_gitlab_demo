@@ -1,8 +1,7 @@
-from hatchet_sdk import Context, Hatchet
+from hatchet_sdk import Context
 from pydantic import BaseModel
 
-
-hatchet = Hatchet()
+from hatchet_client import hatchet
 
 
 class DeploymentInput(BaseModel):
@@ -28,6 +27,7 @@ class FinishResult(BaseModel):
 
 deployment_workflow = hatchet.workflow(
     name="deployment-workflow",
+    input_validator=DeploymentInput,
 )
 
 
@@ -36,9 +36,11 @@ def deploy(
     input: DeploymentInput,
     ctx: Context,
 ) -> DeployResult:
-    print(f"Deploying {input.version} to {input.environment}")
+    print(
+        f"Deploying {input.version} "
+        f"to {input.environment}"
+    )
 
-    # Hier später deine eigentliche Deployment-Logik.
     deployment_id = f"{input.environment}-{input.version}"
 
     return DeployResult(
@@ -57,17 +59,9 @@ def verify(
 
     print(f"Verifying deployment {result.deployment_id}")
 
-    # Hier später z.B.:
-    # - Healthcheck
-    # - Version auf Maschine prüfen
-    # - Service erreichbar?
-    # - erwartete Version aktiv?
-
-    verified = True
-
     return VerifyResult(
         deployment_id=result.deployment_id,
-        verified=verified,
+        verified=True,
     )
 
 
@@ -78,12 +72,12 @@ def finish(
 ) -> FinishResult:
     result = ctx.task_output(verify)
 
-    print(
-        f"Finishing deployment "
-        f"{result.deployment_id}: verified={result.verified}"
-    )
-
     status = "success" if result.verified else "failed"
+
+    print(
+        f"Deployment {result.deployment_id}: "
+        f"{status}"
+    )
 
     return FinishResult(
         deployment_id=result.deployment_id,

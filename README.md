@@ -146,3 +146,15 @@ production-like Docker Compose stack.
 - Job Inputs: GitLab 18.10+
 
 The GitLab Runner image is intentionally pinned rather than using `latest`.
+
+### Status
+
+Hatchet Dashboard: <http://localhost:8081>
+Hatchet API: läuft auf 8080 im Dashboard-Container
+Hatchet Engine: localhost:7077
+PostgreSQL: läuft
+RabbitMQ: läuft
+Python Worker: läuft
+deployment-workflow: funktioniert mit deploy → verify → finish
+
+Damit können wir jetzt beim eigentlichen Architekturteil weitermachen: GitLab ↔ Hatchet und anschließend den Approval-/Waiting-Mechanismus.
