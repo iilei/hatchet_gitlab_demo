@@ -1,0 +1,58 @@
+stages:
+  - prepare
+  - machine
+  - deploy
+
+prepare:
+  stage: prepare
+  script:
+    - echo "Preparing deployment"
+    - echo "commit=$CI_COMMIT_SHA"
+
+machine_work:
+  stage: machine
+  script:
+    - echo "Simulating a long-running machine activity..."
+    - sleep 10
+    - echo "Machine activity completed"
+  artifacts:
+    when: always
+    paths:
+      - deployment-state.txt
+  after_script:
+    - printf '%s\n' "state=verified" > deployment-state.txt
+
+deploy_gate:
+  stage: deploy
+  when: manual
+  inputs:
+    deployment_id:
+      type: string
+      default: "unset"
+      description: "Durable deployment identifier"
+    environment:
+      type: string
+      options:
+        - staging
+        - production
+      default: staging
+      description: "Deployment environment"
+    state_version:
+      type: number
+      default: 0
+      description: "Verified durable state version"
+    artifact_version:
+      type: string
+      default: "latest"
+      description: "Artifact version"
+  script:
+    - echo "deployment_id=${{ job.inputs.deployment_id }}"
+    - echo "environment=${{ job.inputs.environment }}"
+    - echo "state_version=${{ job.inputs.state_version }}"
+    - echo "artifact_version=${{ job.inputs.artifact_version }}"
+    - |
+      if [ "${{ job.inputs.deployment_id }}" = "unset" ]; then
+        echo "No deployment_id supplied; refusing to deploy."
+        exit 1
+      fi
+    - echo "In a real deployment, verify durable state here before side effects."

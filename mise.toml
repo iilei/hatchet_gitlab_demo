@@ -1,0 +1,11 @@
+[tools]
+rumdl = "0.2.74"
+
+[tasks.lint]
+description = "Lint files"
+run = "rumdl check ."
+
+
+[tasks.fmt]
+description = "Lint and format files"
+run = "rumdl format ."

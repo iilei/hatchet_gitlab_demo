@@ -1,0 +1,724 @@
+services:
+  # ==========================================================================
+  # GitLab
+  # ==========================================================================
+
+  gitlab:
+    image: gitlab/gitlab-ce:latest
+    container_name: demo-gitlab
+    hostname: gitlab
+    restart: unless-stopped
+
+    environment:
+      GITLAB_OMNIBUS_CONFIG: |
+        external_url 'http://localhost:8080'
+
+        puma['worker_processes'] = 2
+        sidekiq['max_concurrency'] = 10
+
+        gitlab_rails['initial_root_password'] = ENV['GITLAB_ROOT_PASSWORD']
+
+        prometheus['enable'] = false
+        alertmanager['enable'] = false
+        node_exporter['enable'] = false
+        redis_exporter['enable'] = false
+        postgres_exporter['enable'] = false
+        gitlab_exporter['enable'] = false
+
+        gitlab_rails['gitlab_shell_ssh_port'] = 2222
+
+    ports:
+      - "8080:80"
+      - "2222:22"
+
+    volumes:
+      - gitlab_config:/etc/gitlab
+      - gitlab_logs:/var/log/gitlab
+      - gitlab_data:/var/opt/gitlab
+
+    shm_size: "256m"
+
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - curl --silent --fail http://localhost/-/health
+      interval: 15s
+      timeout: 10s
+      retries: 30
+      start_period: 120s
+
+  # ==========================================================================
+  # GitLab bootstrap
+  #
+  # Creates:
+  #
+  #   1. automation user
+  #   2. deterministic Personal Access Token for that user
+  #   3. demo project
+  #   4. Project Access Token
+  #   5. demo repository
+  #   6. project runner
+  #
+  # No GitLab API token is required before first startup.
+  #
+  # The generated project token is persisted in gitlab_bootstrap_data.
+  # ==========================================================================
+
+  gitlab-bootstrap:
+    image: gitlab/gitlab-ce:latest
+    container_name: demo-gitlab-bootstrap
+
+    depends_on:
+      gitlab:
+        condition: service_healthy
+
+    environment:
+      GITLAB_URL: http://gitlab
+
+      # Credentials for the demo automation identity.
+      AUTOMATION_USERNAME: automation-bot
+      AUTOMATION_PASSWORD: ${GITLAB_AUTOMATION_PASSWORD:-automation-password}
+
+      # Deterministic token used internally to bootstrap the API identity.
+      #
+      # GitLab requires PATs generated this way to be 20 characters.
+      BOOTSTRAP_PAT: ${GITLAB_BOOTSTRAP_PAT:-demoautomationtoken1234}
+
+      DEMO_PROJECT_NAME: demo-deployment
+      DEMO_PROJECT_PATH: demo-deployment
+
+      DEMO_PROJECT_TOKEN_NAME: demo-bootstrap
+      DEMO_PROJECT_TOKEN: ${GITLAB_PROJECT_TOKEN:-demoprojecttoken1234}
+
+      GITLAB_RUNNER_DESCRIPTION: demo-docker-runner
+
+    volumes:
+      - gitlab_config:/etc/gitlab
+      - gitlab_data:/var/opt/gitlab
+
+      # Persist generated bootstrap information.
+      - gitlab_bootstrap_data:/bootstrap-data
+
+      # Runner configuration is consumed by gitlab-runner.
+      - gitlab_runner_config:/runner-config
+
+    entrypoint:
+      - /bin/bash
+      - -ec
+
+    command: |
+
+      echo "============================================================"
+      echo " GitLab bootstrap"
+      echo "============================================================"
+
+      echo
+      echo "Waiting for GitLab Rails..."
+      until gitlab-rails runner "puts User.count" >/dev/null 2>&1; do
+        sleep 5
+      done
+
+      echo "GitLab Rails is ready."
+
+      # ----------------------------------------------------------------------
+      # 1. Create automation user if necessary
+      # ----------------------------------------------------------------------
+
+      gitlab-rails runner "
+        username = ENV['AUTOMATION_USERNAME']
+        password = ENV['AUTOMATION_PASSWORD']
+
+        user = User.find_by_username(username)
+
+        unless user
+          user = User.new(
+            username: username,
+            name: 'Demo Automation Bot',
+            email: 'automation@example.local',
+            password: password,
+            password_confirmation: password
+          )
+
+          user.skip_confirmation!
+          user.admin = true
+          user.save!
+
+          puts 'Created automation user.'
+        else
+          puts 'Automation user already exists.'
+        end
+      "
+
+      # ----------------------------------------------------------------------
+      # 2. Create deterministic PAT for automation user
+      #
+      # GitLab documents this Rails-runner mechanism for automation/testing.
+      # ----------------------------------------------------------------------
+
+      if [ ! -f /bootstrap-data/automation-token ]; then
+
+        gitlab-rails runner "
+          user = User.find_by_username(ENV['AUTOMATION_USERNAME'])
+
+          token = user.personal_access_tokens.find_by_name('demo-bootstrap')
+
+          unless token
+            token = user.personal_access_tokens.create(
+              scopes: ['api'],
+              name: 'demo-bootstrap',
+              expires_at: 365.days.from_now
+            )
+
+            token.set_token(ENV['BOOTSTRAP_PAT'])
+            token.save!
+          end
+
+          puts 'Automation PAT initialized.'
+        "
+
+        printf '%s' "${BOOTSTRAP_PAT}" \
+          > /bootstrap-data/automation-token
+
+        chmod 600 /bootstrap-data/automation-token
+
+      else
+        echo "Automation PAT already exists."
+      fi
+
+      export GITLAB_API_TOKEN="${BOOTSTRAP_PAT}"
+
+      # ----------------------------------------------------------------------
+      # 3. Wait for REST API
+      # ----------------------------------------------------------------------
+
+      echo
+      echo "Waiting for GitLab API..."
+
+      until curl --silent --fail \
+        --header "PRIVATE-TOKEN: ${GITLAB_API_TOKEN}" \
+        "${GITLAB_URL}/api/v4/user" >/dev/null; do
+        sleep 5
+      done
+
+      echo "GitLab API is ready."
+
+      # ----------------------------------------------------------------------
+      # 4. Create project
+      # ----------------------------------------------------------------------
+
+      echo
+      echo "Creating demo project if necessary..."
+
+      PROJECT_JSON="$(
+        curl --silent \
+          --header "PRIVATE-TOKEN: ${GITLAB_API_TOKEN}" \
+          --get \
+          --data-urlencode "search=${DEMO_PROJECT_NAME}" \
+          "${GITLAB_URL}/api/v4/projects"
+      )"
+
+      PROJECT_ID="$(
+        echo "${PROJECT_JSON}" |
+        jq -r --arg path "${DEMO_PROJECT_PATH}" \
+          '.[] | select(.path == $path) | .id' |
+        head -n1
+      )"
+
+      if [ -z "${PROJECT_ID}" ] || [ "${PROJECT_ID}" = "null" ]; then
+
+        PROJECT_ID="$(
+          curl --silent --fail \
+            --request POST \
+            --header "PRIVATE-TOKEN: ${GITLAB_API_TOKEN}" \
+            --header "Content-Type: application/json" \
+            --data "$(jq -n \
+              --arg name "${DEMO_PROJECT_NAME}" \
+              --arg path "${DEMO_PROJECT_PATH}" \
+              '{
+                name: $name,
+                path: $path,
+                visibility: "private",
+                initialize_with_readme: true
+              }')" \
+            "${GITLAB_URL}/api/v4/projects" |
+          jq -r '.id'
+        )"
+
+        echo "Created project ${PROJECT_ID}."
+
+      else
+
+        echo "Project already exists: ${PROJECT_ID}"
+
+      fi
+
+      # ----------------------------------------------------------------------
+      # 5. Create Project Access Token
+      #
+      # This is the token that should be used by the demo automation after
+      # bootstrap. It is scoped to the demo project.
+      # ----------------------------------------------------------------------
+
+      echo
+      echo "Creating project access token if necessary..."
+
+      PROJECT_TOKEN_JSON="$(
+        curl --silent \
+          --header "PRIVATE-TOKEN: ${GITLAB_API_TOKEN}" \
+          "${GITLAB_URL}/api/v4/projects/${PROJECT_ID}/access_tokens"
+      )"
+
+      EXISTING_PROJECT_TOKEN_ID="$(
+        echo "${PROJECT_TOKEN_JSON}" |
+        jq -r --arg name "${DEMO_PROJECT_TOKEN_NAME}" \
+          '.[] | select(.name == $name and .active == true) | .id' |
+        head -n1
+      )"
+
+      if [ -z "${EXISTING_PROJECT_TOKEN_ID}" ] ||
+         [ "${EXISTING_PROJECT_TOKEN_ID}" = "null" ]; then
+
+        curl --silent --fail \
+          --request POST \
+          --header "PRIVATE-TOKEN: ${GITLAB_API_TOKEN}" \
+          --header "Content-Type: application/json" \
+          --data "$(jq -n \
+            --arg name "${DEMO_PROJECT_TOKEN_NAME}" \
+            --arg token "${DEMO_PROJECT_TOKEN}" \
+            '{
+              name: $name,
+              scopes: ["api"],
+              access_level: 40,
+              expires_at: "2035-12-31"
+            }')" \
+          "${GITLAB_URL}/api/v4/projects/${PROJECT_ID}/access_tokens" \
+          > /bootstrap-data/project-token-response.json
+
+        # NOTE:
+        # GitLab generates the actual token value. We intentionally do not
+        # put a user-supplied token into the API request.
+        PROJECT_ACCESS_TOKEN="$(
+          jq -r '.token' /bootstrap-data/project-token-response.json
+        )
+
+        printf '%s' "${PROJECT_ACCESS_TOKEN}" \
+          > /bootstrap-data/project-access-token
+
+        chmod 600 /bootstrap-data/project-access-token
+
+      else
+
+        echo "Project access token already exists."
+
+        if [ -f /bootstrap-data/project-access-token ]; then
+          PROJECT_ACCESS_TOKEN="$(
+            cat /bootstrap-data/project-access-token
+          )
+        else
+          echo
+          echo "ERROR: project token exists but its secret was not persisted."
+          echo "Delete the GitLab project or recreate the token."
+          exit 1
+        fi
+
+      fi
+
+      # ----------------------------------------------------------------------
+      # 6. Create .gitlab-ci.yml
+      # ----------------------------------------------------------------------
+
+      echo
+      echo "Creating demo pipeline..."
+
+      CI_FILE="$(cat <<'EOF'
+      stages:
+        - prepare
+        - long_running
+        - approval
+        - finalize
+
+      variables:
+        DEMO_WORKFLOW: "gitlab-hatchet-demo"
+
+      prepare:
+        stage: prepare
+        image: alpine:3.22
+        script:
+          - echo "Preparing deployment"
+          - echo "Commit: ${CI_COMMIT_SHA}"
+          - echo "Pipeline: ${CI_PIPELINE_ID}"
+
+      long_running_demo:
+        stage: long_running
+        image: alpine:3.22
+        script:
+          - echo "Simulating long-running deployment activity"
+          - echo "In the real PoC this job will trigger Hatchet"
+          - sleep 30
+          - echo "Long-running activity finished"
+
+      human_gate:
+        stage: approval
+        when: manual
+        allow_failure: false
+        script:
+          - echo "Human gate approved"
+          - echo "GitLab is the human interaction layer"
+
+      finalize:
+        stage: finalize
+        image: alpine:3.22
+        script:
+          - echo "Finalizing deployment"
+          - echo "Deployment completed"
+      EOF
+      )"
+
+      EXISTING_CI="$(
+        curl --silent \
+          --header "PRIVATE-TOKEN: ${GITLAB_API_TOKEN}" \
+          "${GITLAB_URL}/api/v4/projects/${PROJECT_ID}/repository/files/.gitlab-ci.yml?ref=main" \
+          || true
+      )"
+
+      if echo "${EXISTING_CI}" | jq -e '.file_path' >/dev/null 2>&1; then
+
+        curl --silent --fail \
+          --request PUT \
+          --header "PRIVATE-TOKEN: ${GITLAB_API_TOKEN}" \
+          --header "Content-Type: application/json" \
+          --data "$(jq -n \
+            --arg branch "main" \
+            --arg content "${CI_FILE}" \
+            '{
+              branch: $branch,
+              content: $content,
+              commit_message: "Update demo pipeline"
+            }')" \
+          "${GITLAB_URL}/api/v4/projects/${PROJECT_ID}/repository/files/.gitlab-ci.yml"
+
+      else
+
+        curl --silent --fail \
+          --request POST \
+          --header "PRIVATE-TOKEN: ${GITLAB_API_TOKEN}" \
+          --header "Content-Type: application/json" \
+          --data "$(jq -n \
+            --arg branch "main" \
+            --arg content "${CI_FILE}" \
+            '{
+              branch: $branch,
+              content: $content,
+              commit_message: "Add demo pipeline"
+            }')" \
+          "${GITLAB_URL}/api/v4/projects/${PROJECT_ID}/repository/files/.gitlab-ci.yml"
+
+      fi
+
+      # ----------------------------------------------------------------------
+      # 7. Create a project runner
+      #
+      # Current GitLab API:
+      #
+      #   POST /user/runners
+      #
+      # returns the runner authentication token.
+      # ----------------------------------------------------------------------
+
+      echo
+      echo "Creating project runner..."
+
+      RUNNER_JSON="$(
+        curl --silent --fail \
+          --request POST \
+          --header "PRIVATE-TOKEN: ${GITLAB_API_TOKEN}" \
+          --header "Content-Type: application/json" \
+          --data "$(jq -n \
+            --arg description "${GITLAB_RUNNER_DESCRIPTION}" \
+            --arg project_id "${PROJECT_ID}" \
+            '{
+              runner_type: "project_type",
+              description: $description,
+              project_id: ($project_id | tonumber),
+              run_untagged: true,
+              locked: true
+            }')" \
+          "${GITLAB_URL}/api/v4/user/runners"
+      )"
+
+      RUNNER_TOKEN="$(echo "${RUNNER_JSON}" | jq -r '.token')"
+
+      if [ -z "${RUNNER_TOKEN}" ] || [ "${RUNNER_TOKEN}" = "null" ]; then
+        echo "Runner creation failed:"
+        echo "${RUNNER_JSON}"
+        exit 1
+      fi
+
+      # ----------------------------------------------------------------------
+      # 8. Write runner configuration
+      # ----------------------------------------------------------------------
+
+      cat > /runner-config/config.toml <<EOF
+      concurrent = 2
+      check_interval = 3
+
+      [[runners]]
+        name = "${GITLAB_RUNNER_DESCRIPTION}"
+        url = "${GITLAB_URL}"
+        token = "${RUNNER_TOKEN}"
+        executor = "docker"
+
+        [runners.docker]
+          image = "alpine:3.22"
+          privileged = false
+          pull_policy = ["if-not-present"]
+          volumes = [
+            "/cache"
+          ]
+      EOF
+
+      chmod 600 /runner-config/config.toml
+
+      # ----------------------------------------------------------------------
+      # 9. Persist useful information without exposing secrets in logs
+      # ----------------------------------------------------------------------
+
+      cat > /bootstrap-data/demo.env <<EOF
+      GITLAB_URL=${GITLAB_URL}
+      GITLAB_PROJECT_ID=${PROJECT_ID}
+      GITLAB_PROJECT_PATH=${DEMO_PROJECT_PATH}
+      EOF
+
+      chmod 600 /bootstrap-data/demo.env
+
+      echo
+      echo "============================================================"
+      echo " GitLab bootstrap complete"
+      echo "============================================================"
+      echo
+      echo "GitLab:       http://localhost:8080"
+      echo "Demo project: http://localhost:8080/root/${DEMO_PROJECT_PATH}"
+      echo
+      echo "Automation credentials are persisted in:"
+      echo "  /bootstrap-data/"
+      echo
+
+  # ==========================================================================
+  # GitLab Runner
+  # ==========================================================================
+
+  gitlab-runner:
+    image: gitlab/gitlab-runner:latest
+    container_name: demo-gitlab-runner
+    restart: unless-stopped
+
+    depends_on:
+      gitlab-bootstrap:
+        condition: service_completed_successfully
+
+    volumes:
+      - gitlab_runner_config:/etc/gitlab-runner
+      - /var/run/docker.sock:/var/run/docker.sock
+
+    networks:
+      - default
+
+  # ==========================================================================
+  # Hatchet
+  #
+  # Auth-disabled development variant.
+  #
+  # This follows the current Hatchet Docker Compose documentation.
+  # ==========================================================================
+
+  hatchet-postgres:
+    image: postgres:15.6
+    container_name: demo-hatchet-postgres
+    restart: unless-stopped
+    hostname: postgres
+
+    command: postgres -c 'max_connections=1000'
+
+    environment:
+      POSTGRES_USER: hatchet
+      POSTGRES_PASSWORD: hatchet
+      POSTGRES_DB: hatchet
+
+    volumes:
+      - hatchet_postgres_data:/var/lib/postgresql/data
+
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -d hatchet -U hatchet
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 10s
+
+  hatchet-rabbitmq:
+    image: rabbitmq:3-management
+    container_name: demo-hatchet-rabbitmq
+    hostname: rabbitmq
+    restart: unless-stopped
+
+    environment:
+      RABBITMQ_DEFAULT_USER: user
+      RABBITMQ_DEFAULT_PASS: password
+
+    volumes:
+      - hatchet_rabbitmq_data:/var/lib/rabbitmq
+      - hatchet_rabbitmq_config:/etc/rabbitmq
+
+    healthcheck:
+      test:
+        - CMD
+        - rabbitmqctl
+        - status
+      interval: 10s
+      timeout: 10s
+      retries: 10
+
+  hatchet-migration:
+    image: ghcr.io/hatchet-dev/hatchet/hatchet-migrate:latest
+    container_name: demo-hatchet-migration
+
+    command: /hatchet/hatchet-migrate
+
+    environment:
+      DATABASE_URL: postgres://hatchet:hatchet@hatchet-postgres:5432/hatchet
+
+    depends_on:
+      hatchet-postgres:
+        condition: service_healthy
+
+  hatchet-setup:
+    image: ghcr.io/hatchet-dev/hatchet/hatchet-admin-dev:latest
+    container_name: demo-hatchet-setup
+
+    command:
+      - /hatchet/hatchet-admin
+      - quickstart
+      - --skip
+      - certs
+      - --generated-config-dir
+      - /hatchet/config
+      - --overwrite=false
+
+    environment:
+      DATABASE_URL: postgres://hatchet:hatchet@hatchet-postgres:5432/hatchet
+
+      SERVER_MSGQUEUE_RABBITMQ_URL: amqp://user:password@hatchet-rabbitmq:5672/
+
+      SERVER_AUTH_COOKIE_DOMAIN: localhost:8081
+      SERVER_AUTH_COOKIE_INSECURE: "t"
+
+      SERVER_GRPC_BIND_ADDRESS: "0.0.0.0"
+      SERVER_GRPC_INSECURE: "t"
+
+      # Important: workers in this compose network must be able
+      # to resolve the engine by service name.
+      SERVER_GRPC_BROADCAST_ADDRESS: hatchet-engine:7070
+      SERVER_INTERNAL_CLIENT_INTERNAL_GRPC_BROADCAST_ADDRESS: hatchet-engine:7070
+
+    volumes:
+      - hatchet_certs:/hatchet/certs
+      - hatchet_config:/hatchet/config
+
+    depends_on:
+      hatchet-migration:
+        condition: service_completed_successfully
+      hatchet-rabbitmq:
+        condition: service_healthy
+      hatchet-postgres:
+        condition: service_healthy
+
+  hatchet-engine:
+    image: ghcr.io/hatchet-dev/hatchet/hatchet-engine-dev:latest
+    container_name: demo-hatchet-engine
+    restart: on-failure
+
+    command:
+      - /hatchet/hatchet-engine
+      - --config
+      - /hatchet/config
+
+    environment:
+      DATABASE_URL: postgres://hatchet:hatchet@hatchet-postgres:5432/hatchet
+      SERVER_GRPC_BIND_ADDRESS: "0.0.0.0"
+      SERVER_GRPC_INSECURE: "t"
+
+    ports:
+      - "7077:7070"
+
+    volumes:
+      - hatchet_certs:/hatchet/certs
+      - hatchet_config:/hatchet/config
+
+    depends_on:
+      hatchet-setup:
+        condition: service_completed_successfully
+      hatchet-migration:
+        condition: service_completed_successfully
+
+  hatchet-dashboard:
+    image: ghcr.io/hatchet-dev/hatchet/hatchet-dashboard-dev:latest
+    container_name: demo-hatchet-dashboard
+    restart: on-failure
+
+    command:
+      - sh
+      - ./entrypoint.sh
+      - --config
+      - /hatchet/config
+
+    ports:
+      - "8081:80"
+
+    environment:
+      DATABASE_URL: postgres://hatchet:hatchet@hatchet-postgres:5432/hatchet
+
+    volumes:
+      - hatchet_certs:/hatchet/certs
+      - hatchet_config:/hatchet/config
+
+    depends_on:
+      hatchet-setup:
+        condition: service_completed_successfully
+      hatchet-migration:
+        condition: service_completed_successfully
+
+# ============================================================================
+# Named volumes
+# ============================================================================
+
+volumes:
+  gitlab_config:
+    name: demo_gitlab_config
+
+  gitlab_logs:
+    name: demo_gitlab_logs
+
+  gitlab_data:
+    name: demo_gitlab_data
+
+  gitlab_bootstrap_data:
+    name: demo_gitlab_bootstrap_data
+
+  gitlab_runner_config:
+    name: demo_gitlab_runner_config
+
+  hatchet_postgres_data:
+    name: demo_hatchet_postgres_data
+
+  hatchet_rabbitmq_data:
+    name: demo_hatchet_rabbitmq_data
+
+  hatchet_rabbitmq_config:
+    name: demo_hatchet_rabbitmq_config
+
+  hatchet_config:
+    name: demo_hatchet_config
+
+  hatchet_certs:
+    name: demo_hatchet_certs
