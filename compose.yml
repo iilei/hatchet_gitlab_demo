@@ -1,0 +1,304 @@
+services:
+  # ============================================================
+  # GitLab
+  # ============================================================
+
+  gitlab:
+    image: gitlab/gitlab-ce:19.4.1-ce.0
+    container_name: demo-gitlab
+    hostname: gitlab
+    restart: unless-stopped
+
+    shm_size: "256m"
+
+    ports:
+      - "8080:80"
+      - "2222:22"
+
+    environment:
+      GITLAB_ROOT_PASSWORD: ${GITLAB_ROOT_PASSWORD:-DemoRootPassword123!}
+
+      GITLAB_OMNIBUS_CONFIG: |
+        external_url 'http://localhost:8080'
+
+        # GitLab SSH
+        gitlab_rails['gitlab_shell_ssh_port'] = 2222
+
+        # NGINX listens inside the container on port 80.
+        # Host port 8080 -> container port 80.
+        gitlab_rails['nginx']['listen_port'] = 80
+        gitlab_rails['nginx']['listen_https'] = false
+
+        # Demo resource limits
+        puma['worker_processes'] = 2
+        sidekiq['max_concurrency'] = 5
+
+        # Initial root password.
+        # Only relevant when GitLab is initialized for the first time.
+        gitlab_rails['initial_root_password'] = ENV['GITLAB_ROOT_PASSWORD']
+
+        # Monitoring endpoints such as /-/health are protected
+        # by an IP allowlist.
+        gitlab_rails['monitoring_whitelist'] = [
+          '127.0.0.0/8',
+          '::1/128',
+          '172.25.0.1/32'
+        ]
+
+        # Disable components we don't need for the demo.
+        prometheus['enable'] = false
+        alertmanager['enable'] = false
+        node_exporter['enable'] = false
+        redis_exporter['enable'] = false
+        postgres_exporter['enable'] = false
+        gitlab_exporter['enable'] = false
+
+    volumes:
+      - gitlab_config:/etc/gitlab
+      - gitlab_logs:/var/log/gitlab
+      - gitlab_data:/var/opt/gitlab
+
+    networks:
+      demo:
+        ipv4_address: 172.25.0.10
+
+    healthcheck:
+      test: ["CMD-SHELL", "curl --silent --fail http://localhost/-/health >/dev/null || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 30
+      start_period: 180s
+
+  # ============================================================
+  # GitLab bootstrap
+  #
+  # IMPORTANT:
+  # This container should NOT mount GitLab's internal volumes.
+  #
+  # For the cleanest demo, provide a bootstrap API token through
+  # GITLAB_BOOTSTRAP_TOKEN.
+  # ============================================================
+
+  gitlab-bootstrap:
+    image: alpine:3.22
+    container_name: demo-gitlab-bootstrap
+    restart: "no"
+
+    depends_on:
+      gitlab:
+        condition: service_healthy
+
+    environment:
+      GITLAB_URL: http://gitlab
+      GITLAB_BOOTSTRAP_TOKEN: ${GITLAB_BOOTSTRAP_TOKEN}
+
+      DEMO_PROJECT_NAME: demo-deployment
+      DEMO_PROJECT_PATH: demo-deployment
+
+      GITLAB_RUNNER_DESCRIPTION: demo-docker-runner
+
+    volumes:
+      - gitlab_runner_config:/runner-config
+      - ./bootstrap/gitlab-bootstrap.sh:/bootstrap.sh:ro
+
+    networks:
+      - demo
+
+    entrypoint:
+      - /bin/sh
+      - /bootstrap.sh
+
+  # ============================================================
+  # GitLab Runner
+  # ============================================================
+
+  gitlab-runner:
+    image: gitlab/gitlab-runner:alpine-v18.10.1
+    container_name: demo-gitlab-runner
+    restart: unless-stopped
+
+    depends_on:
+      gitlab:
+        condition: service_healthy
+    volumes:
+      - gitlab_runner_config:/etc/gitlab-runner
+      - /var/run/docker.sock:/var/run/docker.sock
+
+    networks:
+      - demo
+
+  # ============================================================
+  # Hatchet PostgreSQL
+  # ============================================================
+
+  hatchet-postgres:
+    image: postgres:15.6
+    container_name: demo-hatchet-postgres
+    restart: unless-stopped
+
+    environment:
+      POSTGRES_DB: hatchet
+      POSTGRES_USER: hatchet
+      POSTGRES_PASSWORD: hatchet
+
+    volumes:
+      - hatchet_postgres_data:/var/lib/postgresql/data
+
+    networks:
+      - hatchet
+
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hatchet -d hatchet"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # ============================================================
+  # Hatchet RabbitMQ
+  # ============================================================
+
+  hatchet-rabbitmq:
+    image: rabbitmq:3-management
+    container_name: demo-hatchet-rabbitmq
+    restart: unless-stopped
+
+    environment:
+      RABBITMQ_DEFAULT_USER: hatchet
+      RABBITMQ_DEFAULT_PASS: hatchet
+
+    volumes:
+      - hatchet_rabbitmq_data:/var/lib/rabbitmq
+
+    networks:
+      - hatchet
+
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # ============================================================
+  # Hatchet migration
+  # ============================================================
+
+  hatchet-migration:
+    image: ghcr.io/hatchet-dev/hatchet/hatchet-migrate:latest
+    container_name: demo-hatchet-migration
+
+    depends_on:
+      hatchet-postgres:
+        condition: service_healthy
+
+    environment:
+      DATABASE_URL: postgresql://hatchet:hatchet@hatchet-postgres:5432/hatchet
+
+    networks:
+      - hatchet
+
+  # ============================================================
+  # Hatchet setup
+  # ============================================================
+
+  hatchet-setup:
+    image: ghcr.io/hatchet-dev/hatchet/hatchet-admin-dev:latest
+    container_name: demo-hatchet-setup
+
+    depends_on:
+      hatchet-migration:
+        condition: service_completed_successfully
+      hatchet-rabbitmq:
+        condition: service_healthy
+
+    environment:
+      DATABASE_URL: postgresql://hatchet:hatchet@hatchet-postgres:5432/hatchet
+
+    networks:
+      - hatchet
+
+  # ============================================================
+  # Hatchet engine
+  # ============================================================
+
+  hatchet-engine:
+    image: ghcr.io/hatchet-dev/hatchet/hatchet-engine-dev:latest
+    container_name: demo-hatchet-engine
+    restart: unless-stopped
+
+    depends_on:
+      hatchet-setup:
+        condition: service_completed_successfully
+
+    environment:
+      DATABASE_URL: postgresql://hatchet:hatchet@hatchet-postgres:5432/hatchet
+
+      SERVER_AUTH_COOKIE_DOMAIN: localhost
+      SERVER_AUTH_COOKIE_INSECURE: "true"
+
+    ports:
+      - "7077:7070"
+
+    networks:
+      - hatchet
+
+  # ============================================================
+  # Hatchet dashboard
+  # ============================================================
+
+  hatchet-dashboard:
+    image: ghcr.io/hatchet-dev/hatchet/hatchet-dashboard-dev:latest
+    container_name: demo-hatchet-dashboard
+    restart: unless-stopped
+
+    depends_on:
+      hatchet-engine:
+        condition: service_started
+
+    environment:
+      API_URL: http://hatchet-engine:7070
+
+    ports:
+      - "8081:80"
+
+    networks:
+      - hatchet
+
+# ==============================================================
+# Networks
+# ==============================================================
+
+networks:
+  demo:
+    name: demo-network
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.25.0.0/16
+          gateway: 172.25.0.1
+
+  hatchet:
+    name: hatchet-network
+    driver: bridge
+
+# ==============================================================
+# Volumes
+# ==============================================================
+
+volumes:
+  gitlab_config:
+    name: demo_gitlab_config
+
+  gitlab_logs:
+    name: demo_gitlab_logs
+
+  gitlab_data:
+    name: demo_gitlab_data
+
+  gitlab_runner_config:
+    name: demo_gitlab_runner_config
+
+  hatchet_postgres_data:
+    name: demo_hatchet_postgres_data
+
+  hatchet_rabbitmq_data:
+    name: demo_hatchet_rabbitmq_data

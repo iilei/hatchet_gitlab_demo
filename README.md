@@ -1,4 +1,4 @@
-# GitLab + Hatchet deployment-orchestration demo
+# Demo Case: GitLab + Hatchet Durable Execution Orchestration Layer
 
 Local demo scaffold for:
 
@@ -20,7 +20,7 @@ docker logs -f demo-gitlab
 ```
 
 Check readiness:
-    
+
 ```bash
 curl http://localhost:8080/-/health
 ```
@@ -43,16 +43,20 @@ Copy `demo-project/.gitlab-ci.yml` into the repository and push it.
 
 ## 3. Create/register a Runner
 
+```
+docker compose up -d gitlab-runner
+```
+
 In GitLab: Admin Area -> CI/CD -> Runners. Create an instance/group/project
 runner and copy its `glrt-...` authentication token.
 
 Then:
 
 ```bash
-docker exec -it demo-gitlab-runner gitlab-runner register \
+docker exec -it demo-gitlab gitlab-runner register \
   --non-interactive \
   --url "http://gitlab/" \
-  --token "glrt-REPLACE_ME" \
+  --token "glrt-dgJI0d3QSpGkNqqpIrVVUG86MQpwOjEKdDozCnU6MQ8.01.1708cdewf" \
   --executor "docker" \
   --description "demo-docker-runner" \
   --docker-image "alpine:3.22"
