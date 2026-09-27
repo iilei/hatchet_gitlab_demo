@@ -242,7 +242,9 @@ services:
       SERVER_ENCRYPTION_JWT_PRIVATE_KEYSET_FILE: /encryption-keys/private_ec256.key
       SERVER_ENCRYPTION_JWT_PUBLIC_KEYSET_FILE: /encryption-keys/public_ec256.key
 
-      # SERVER_GRPC_BIND_ADDRESS: 0.0.0.0
+      SERVER_GRPC_BIND_ADDRESS: "0.0.0.0"
+      SERVER_GRPC_INSECURE: "true"
+      SERVER_GRPC_BROADCAST_ADDRESS: "localhost:7077"
     ports:
       - "7077:7070"
 

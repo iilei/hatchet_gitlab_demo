@@ -1,4 +1,5 @@
 [tools]
+poetry = "latest"
 rumdl = "0.2.74"
 
 [tasks.lint]
