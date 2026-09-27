@@ -192,7 +192,8 @@ services:
 
     environment:
       DATABASE_URL: postgresql://hatchet:hatchet@hatchet-postgres:5432/hatchet
-
+      ADMIN_EMAIL: ${HATCHET_ADMIN_EMAIL}
+      ADMIN_PASSWORD: ${HATCHET_ADMIN_PASSWORD}
     networks:
       - hatchet
 
@@ -234,12 +235,21 @@ services:
 
       SERVER_AUTH_COOKIE_DOMAIN: localhost
       SERVER_AUTH_COOKIE_INSECURE: "true"
+      SERVER_AUTH_COOKIE_SECRETS: ${HATCHET_AUTH_COOKIE_SECRETS}
 
+      SERVER_MSGQUEUE_RABBITMQ_URL: amqp://hatchet:hatchet@hatchet-rabbitmq:5672/
+      SERVER_ENCRYPTION_MASTER_KEYSET_FILE: /encryption-keys/master.key
+      SERVER_ENCRYPTION_JWT_PRIVATE_KEYSET_FILE: /encryption-keys/private_ec256.key
+      SERVER_ENCRYPTION_JWT_PUBLIC_KEYSET_FILE: /encryption-keys/public_ec256.key
+
+      # SERVER_GRPC_BIND_ADDRESS: 0.0.0.0
     ports:
       - "7077:7070"
 
     networks:
       - hatchet
+    volumes:
+      - ./hatchet/encryption-keys:/encryption-keys:ro
 
   # ============================================================
   # Hatchet dashboard
@@ -255,14 +265,31 @@ services:
         condition: service_started
 
     environment:
-      API_URL: http://hatchet-engine:7070
+      DATABASE_URL: postgresql://hatchet:hatchet@hatchet-postgres:5432/hatchet
+      DATABASE_POSTGRES_HOST: hatchet-postgres
+      DATABASE_POSTGRES_PORT: "5432"
+      DATABASE_POSTGRES_USERNAME: hatchet
+      DATABASE_POSTGRES_PASSWORD: hatchet
+      ADMIN_EMAIL: ${HATCHET_ADMIN_EMAIL}
+      ADMIN_PASSWORD: ${HATCHET_ADMIN_PASSWORD}
 
+      SERVER_AUTH_COOKIE_DOMAIN: localhost
+      SERVER_AUTH_COOKIE_INSECURE: "true"
+      SERVER_AUTH_COOKIE_SECRETS: ${HATCHET_AUTH_COOKIE_SECRETS}
+
+      SERVER_MSGQUEUE_RABBITMQ_URL: amqp://hatchet:hatchet@hatchet-rabbitmq:5672/
+
+      SERVER_ENCRYPTION_MASTER_KEYSET_FILE: /encryption-keys/master.key
+      SERVER_ENCRYPTION_JWT_PRIVATE_KEYSET_FILE: /encryption-keys/private_ec256.key
+      SERVER_ENCRYPTION_JWT_PUBLIC_KEYSET_FILE: /encryption-keys/public_ec256.key
     ports:
       - "8081:80"
 
     networks:
       - hatchet
-
+    # generate keys: `mise run hatchet-generate-keys`
+    volumes:
+      - ./hatchet/encryption-keys:/encryption-keys:ro
 # ==============================================================
 # Networks
 # ==============================================================

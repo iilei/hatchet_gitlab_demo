@@ -9,3 +9,40 @@ run = "rumdl check ."
 [tasks.fmt]
 description = "Lint and format files"
 run = "rumdl format ."
+
+[tasks.hatchet-generate-keys]
+description = "Generate Hatchet local encryption keysets"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+
+KEY_DIR="${MISE_PROJECT_ROOT}/hatchet/encryption-keys"
+
+mkdir -p "${KEY_DIR}"
+
+if [[ -f "${KEY_DIR}/master.key" ]] &&
+   [[ -f "${KEY_DIR}/private_ec256.key" ]] &&
+   [[ -f "${KEY_DIR}/public_ec256.key" ]]; then
+  echo "Hatchet encryption keys already exist:"
+  echo "  ${KEY_DIR}"
+  exit 0
+fi
+
+docker run --rm \
+  -v "${KEY_DIR}:/encryption-keys" \
+  --entrypoint /hatchet/hatchet-admin \
+  ghcr.io/hatchet-dev/hatchet/hatchet-admin-dev:latest \
+  keyset create-local-keys \
+  --key-dir /encryption-keys
+
+echo "Hatchet encryption keys generated:"
+find "${KEY_DIR}" -maxdepth 1 -type f -print
+"""
+
+[tasks.pass]
+run = """\
+printf 'H%s%s%s\n' \
+  "$(openssl rand -hex 8)" \
+  "$(openssl rand -hex 4 | tr '[:lower:]' '[:upper:]')" \
+  "$(shuf -i 0-9 -n 1)"
+"""
